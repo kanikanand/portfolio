@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Risograph Letter</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { overflow: hidden; background: #F2E8DC; touch-action: none; }
+  canvas { display: block; }
+  #hint {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+    font-family: monospace; font-size: 13px; color: #555; opacity: 0.7;
+    pointer-events: none; letter-spacing: 0.08em;
+  }
+</style>
+</head>
+<body>
+<div id="hint">tap to change letter</div>
+
+<!-- p5.js and opentype.js from CDN -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/opentype.js/1.3.4/opentype.min.js"></script>
+
+<script>
+// ─── GLOBAL CONFIGURATION ──────────────────────────────────────────
+const BG_COLOR         = '#F2E8DC';   // paper / background
+const OUTLINE_COLOR    = '#1A1010';   // letter stroke
+const GRAIN_COLOR      = '#1A1010';   // noise dot color
+
+// Risograph ink palette
+const PALETTE = [
+  '#E8453C',  // fluorescent red
+  '#E8873C',  // orange
+  '#F5C842',  // yellow
+  '#3CB87A',  // green
+  '#2E5FAA',  // blue
+  '#8B3CC8',  // purple
+  '#E84C8B',  // pink
+  '#3CC8C8',  // teal
+];
+
+const STRIPE_DARK  = '#1A1010';
+const STRIPE_LIGHT = '#F2E8DC';
+const GRAIN_DARK   = '#1A1010';
+const GRAIN_LIGHT  = '#F2E8DC';
+
+// Minimum distance between two outline points before they get connected
+const CONNECTION_THRESHOLD = 40;
+
+// Number of points sampled along glyph outline
+const SAMPLE_COUNT = 120;
+
+// Grain density (dots per 1000px²)
+const GRAIN_DENSITY = 0.18;
+
+// Font URL — bold geometric sans
+const FONT_URL_TTF = 'https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/montserrat/static/Montserrat-Bold.ttf';
+
+const ALL_LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+// ───────────────────────────────────────────────────────────────────
+
+let otFont = null;
+let currentLetter = 'A';
+let letterPoints = [];   // sampled outline points
+let polygons = [];       // list of {verts, fillType, colors}
+let grainLayer;          // off-screen p5.Graphics for grain
+
+new p5(function(p) {
+
+  // ── helpers ──────────────────────────────────────────────────────
+
+  function sampleBezier(x0,y0, cx1,cy1, cx2,cy2, x1,y1, steps) {
+    const pts = [];
+    for (let i = 1; i <= steps; i++) {
+      const t = i / steps;
+      const mt = 1 - t;
+      pts.push({
+        x: mt*mt*mt*x0 + 3*mt*mt*t*cx1 + 3*mt*t*t*cx2 + t*t*t*x1,
+        y: mt*mt*mt*y0 + 3*mt*mt*t*cy1 + 3*mt*t*t*cy2 + t*t*t*y1,
+      });
+    }
+    return pts;
+  }
+
+  function sampleQuad(x0,y0, cx,cy, x1,y1, steps) {
+    const pts = [];
+    for (let i = 1; i <= steps; i++) {
+      const t = i / steps;
+      const mt = 1 - t;
+      pts.push({
+        x: mt*mt*x0 + 2*mt*t*cx + t*t*x1,
+        y: mt*mt*y0 + 2*mt*t*cy + t*t*y1,
+      });
+    }
+    return pts;
+  }
+
+  // Extract all outline points from all contours of a glyph
+  function getGlyphPoints(glyph) {
+    const path = glyph.getPath(0, 0, 1);
+    const allContours = [];
+    let current = [];
+    let startX = 0, startY = 0;
+    let curX = 0, curY = 0;
+
+    for (const cmd of path.commands) {
+      if (cmd.type === 'M') {
+        if (current.length) allContours.push(current);
+        current = [];
+        startX = cmd.x; startY = cmd.y;
+        curX = cmd.x; curY = cmd.y;
+        current.push({ x: curX, y: curY });
+      } else if (cmd.type === 'L') {
+        current.push({ x: cmd.x, y: cmd.y });
+        curX = cmd.x; curY = cmd.y;
+      } else if (cmd.type === 'Q') {
+        const pts = sampleQuad(curX, curY, cmd.x1, cmd.y1, cmd.x, cmd.y, 6);
+        current.push(...pts);
+        curX = cmd.x; curY = cmd.y;
+      } else if (cmd.type === 'C') {
+        const pts = sampleBezier(curX, curY, cmd.x1, cmd.y1, cmd.x2, cmd.y2, cmd.x, cmd.y, 8);
+        current.push(...pts);
+        curX = cmd.x; curY = cmd.y;
+      } else if (cmd.type === 'Z') {
+        current.push({ x: startX, y: startY });
+        allContours.push(current);
+        current = [];
+      }
+    }
+    if (current.length) allContours.push(current);
+    return allContours;
+  }
+
+  // Resample a contour to exactly n evenly-spaced points by arc length
+  function resample(contour, n) {
+    const out = [];
+    // compute cumulative arc lengths
+    const arcs = [0];
+    for (let i = 1; i < contour.length; i++) {
+      const dx = contour[i].x - contour[i-1].x;
+      const dy = contour[i].y - contour[i-1].y;
+      arcs.push(arcs[i-1] + Math.sqrt(dx*dx + dy*dy));
+    }
+    const total = arcs[arcs.length - 1];
+    for (let s = 0; s < n; s++) {
+      const target = (s / n) * total;
+      let lo = 0, hi = arcs.length - 1;
+      while (hi - lo > 1) {
+        const mid = (lo + hi) >> 1;
+        if (arcs[mid] <= target) lo = mid; else hi = mid;
+      }
+      const t = (target - arcs[lo]) / (arcs[hi] - arcs[lo] || 1);
+      out.push({
+        x: contour[lo].x + t * (contour[hi].x - contour[lo].x),
+        y: contour[lo].y + t * (contour[hi].y - contour[lo].y),
+      });
+    }
+    return out;
+  }
+
+  function dist2(a, b) { return (a.x-b.x)**2 + (a.y-b.y)**2; }
+
+  // Random pick from array
+  function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
+
+  // Shuffle array (Fisher-Yates)
+  function shuffle(arr) {
+    for (let i = arr.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+    return arr;
+  }
+
+  // ── polygon builders ─────────────────────────────────────────────
+
+  // Build polygons by connecting "opposite" points across a single contour.
+  // Point i connects to point i + floor(n/2) when distance > THRESHOLD.
+  // Each quad is (p[i], p[i+1], p[opp+1], p[opp]).
+  function buildPolygons(contours) {
+    const threshold = CONNECTION_THRESHOLD;  // already in screen pixels
+    const polys = [];
+    const fillTypes = ['checks', 'stripes', 'noise'];
+
+    for (const contour of contours) {
+      const n = contour.length;
+      const half = Math.floor(n / 2);
+
+      for (let i = 0; i < half; i++) {
+        const a  = contour[i];
+        const b  = contour[(i + 1) % n];
+        const opp = (i + half) % n;
+        const c  = contour[opp];
+        const d  = contour[(opp + 1) % n];
+
+        // Check both diagonals exceed threshold
+        if (dist2(a, c) < threshold * threshold) continue;
+
+        const ft = pick(fillTypes);
+        let colors;
+        if (ft === 'checks') {
+          // pick 2 random palette colors
+          const shuffled = shuffle([...PALETTE]);
+          colors = [shuffled[0], shuffled[1]];
+        } else {
+          colors = [STRIPE_DARK, STRIPE_LIGHT];
+        }
+
+        const stripeAngle = Math.random() * Math.PI;
+        polys.push({ verts: [a, b, d, c], fillType: ft, colors, stripeAngle });
+      }
+    }
+    return polys;
+  }
+
+  // ── drawing patterns ─────────────────────────────────────────────
+
+  function drawChecks(ctx, verts, c1, c2, size) {
+    // bounding box of polygon
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const v of verts) {
+      if (v.x < minX) minX = v.x; if (v.x > maxX) maxX = v.x;
+      if (v.y < minY) minY = v.y; if (v.y > maxY) maxY = v.y;
+    }
+    const startX = Math.floor(minX / size) * size;
+    const startY = Math.floor(minY / size) * size;
+    for (let gy = startY; gy < maxY; gy += size) {
+      for (let gx = startX; gx < maxX; gx += size) {
+        const col = ((Math.floor(gx/size) + Math.floor(gy/size)) % 2 === 0) ? c1 : c2;
+        ctx.fillStyle = col;
+        ctx.fillRect(gx, gy, size, size);
+      }
+    }
+  }
+
+  function drawStripes(ctx, verts, c1, c2, width, angle) {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const v of verts) {
+      if (v.x < minX) minX = v.x; if (v.x > maxX) maxX = v.x;
+      if (v.y < minY) minY = v.y; if (v.y > maxY) maxY = v.y;
+    }
+    const diag = Math.sqrt((maxX-minX)**2 + (maxY-minY)**2) + width * 2;
+    const cx = (minX + maxX) / 2;
+    const cy = (minY + maxY) / 2;
+
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(angle);
+    const n = Math.ceil(diag / width) + 2;
+    for (let i = -n; i <= n; i++) {
+      ctx.fillStyle = i % 2 === 0 ? c1 : c2;
+      ctx.fillRect(i * width - width/2, -diag/2, width, diag);
+    }
+    ctx.restore();
+  }
+
+  function drawNoise(ctx, verts, c1, c2) {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const v of verts) {
+      if (v.x < minX) minX = v.x; if (v.x > maxX) maxX = v.x;
+      if (v.y < minY) minY = v.y; if (v.y > maxY) maxY = v.y;
+    }
+    // base fill
+    ctx.fillStyle = c2;
+    ctx.fillRect(minX, minY, maxX - minX, maxY - minY);
+    // random dots
+    const area = (maxX - minX) * (maxY - minY);
+    const count = Math.floor(area * GRAIN_DENSITY);
+    ctx.fillStyle = c1;
+    for (let i = 0; i < count; i++) {
+      const x = minX + Math.random() * (maxX - minX);
+      const y = minY + Math.random() * (maxY - minY);
+      ctx.fillRect(x, y, 1.5, 1.5);
+    }
+  }
+
+  function clipAndDraw(p, poly) {
+    const { verts, fillType, colors } = poly;
+    const ctx = p.drawingContext;
+    ctx.save();
+
+    // clip path
+    ctx.beginPath();
+    ctx.moveTo(verts[0].x, verts[0].y);
+    for (let i = 1; i < verts.length; i++) ctx.lineTo(verts[i].x, verts[i].y);
+    ctx.closePath();
+    ctx.clip();
+
+    const size = Math.max(12, p.width * 0.025);
+
+    if (fillType === 'checks') {
+      drawChecks(ctx, verts, colors[0], colors[1], size);
+    } else if (fillType === 'stripes') {
+      drawStripes(ctx, verts, colors[0], colors[1], size * 0.7, poly.stripeAngle);
+    } else {
+      drawNoise(ctx, verts, GRAIN_DARK, GRAIN_LIGHT);
+    }
+
+    ctx.restore();
+  }
+
+  // ── grain overlay ────────────────────────────────────────────────
+
+  function buildGrain(p) {
+    const g = p.createGraphics(p.width, p.height);
+    g.noStroke();
+    const totalPx = p.width * p.height;
+    const dots = Math.floor(totalPx * 0.04);
+    g.fill(GRAIN_COLOR + '22');
+    for (let i = 0; i < dots; i++) {
+      g.ellipse(Math.random() * p.width, Math.random() * p.height, 1.2, 1.2);
+    }
+    return g;
+  }
+
+  // ── letter regeneration ──────────────────────────────────────────
+
+  function generateLetter(p, letter) {
+    if (!otFont) return;
+
+    const glyph = otFont.charToGlyph(letter);
+
+    // Collect raw contour points (path coords use fontSize=1 scale)
+    const rawContours = getGlyphPoints(glyph);
+
+    // Compute actual point bounds (avoids getBoundingBox unit mismatch)
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const c of rawContours) {
+      for (const pt of c) {
+        if (pt.x < minX) minX = pt.x; if (pt.x > maxX) maxX = pt.x;
+        if (pt.y < minY) minY = pt.y; if (pt.y > maxY) maxY = pt.y;
+      }
+    }
+
+    const margin = p.min(p.width, p.height) * 0.1;
+    const availW = p.width  - margin * 2;
+    const availH = p.height - margin * 2;
+    const glyphW  = maxX - minX;
+    const glyphH  = maxY - minY;
+    const scale   = Math.min(availW / (glyphW || 1), availH / (glyphH || 1));
+    const glyphCx = (minX + maxX) / 2;
+    const glyphCy = (minY + maxY) / 2;
+    const screenCx = p.width  / 2;
+    const screenCy = p.height / 2;
+
+    // Resample and map to screen coords (Y-flipped: glyph Y-up → canvas Y-down)
+    const screenContours = rawContours.map(c => {
+      const resampled = resample(c, SAMPLE_COUNT);
+      return resampled.map(pt => ({
+        x: screenCx + (pt.x - glyphCx) * scale,
+        y: screenCy - (pt.y - glyphCy) * scale,
+      }));
+    });
+
+    polygons = buildPolygons(screenContours);
+    letterPoints = screenContours;
+  }
+
+  // ── p5 lifecycle ─────────────────────────────────────────────────
+
+  p.setup = function() {
+    const cnv = p.createCanvas(p.windowWidth, p.windowHeight);
+    cnv.elt.addEventListener('touchstart', onTap, { passive: true });
+    p.noLoop();
+
+    // Load font via fetch → opentype.parse (reliable CORS path)
+    fetch(FONT_URL_TTF)
+      .then(r => r.arrayBuffer())
+      .then(buf => {
+        otFont = opentype.parse(buf);
+        grainLayer = buildGrain(p);
+        generateLetter(p, currentLetter);
+        p.redraw();
+      })
+      .catch(err => console.error('Font load failed:', err));
+  };
+
+  p.draw = function() {
+    p.background(BG_COLOR);
+
+    // draw filled polygons
+    for (const poly of polygons) {
+      clipAndDraw(p, poly);
+    }
+
+    // draw letter outlines on top
+    p.noFill();
+    p.stroke(OUTLINE_COLOR);
+    p.strokeWeight(Math.max(1.5, p.width * 0.003));
+    for (const contour of letterPoints) {
+      p.beginShape();
+      for (const pt of contour) p.vertex(pt.x, pt.y);
+      p.endShape(p.CLOSE);
+    }
+
+    // grain overlay
+    if (grainLayer) p.image(grainLayer, 0, 0);
+  };
+
+  p.windowResized = function() {
+    p.resizeCanvas(p.windowWidth, p.windowHeight);
+    grainLayer = buildGrain(p);
+    generateLetter(p, currentLetter);
+    p.redraw();
+  };
+
+  function onTap() {
+    const letters = ALL_LETTERS.replace(currentLetter, '');
+    currentLetter = letters[Math.floor(Math.random() * letters.length)];
+    generateLetter(p, currentLetter);
+    p.redraw();
+  }
+
+  p.mousePressed = function() {
+    onTap();
+  };
+});
+</script>
+</body>
+</html>
