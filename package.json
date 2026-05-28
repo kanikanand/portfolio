@@ -1,0 +1,7 @@
+{
+  "dependencies": {
+    "@fontsource/montserrat": "^5.2.8",
+    "opentype.js": "^2.0.0",
+    "p5": "^2.3.0"
+  }
+}
