@@ -109,18 +109,46 @@ new p5(function(p) {
     return a;
   }
 
+  // ── irregular layout generators ──────────────────────────────────
+  // Produce column/row positions with randomised gaps for uneven grids,
+  // and stripe widths that vary across the polygon.
+
+  function makeIrregularGrid(start, end, base) {
+    const lines = [start];
+    let pos = start;
+    while (pos < end) {
+      pos += base * (0.25 + Math.random() * 1.6);
+      lines.push(pos);
+    }
+    return lines;
+  }
+
+  function makeIrregularWidths(total, base) {
+    const widths = [];
+    let x = 0;
+    while (x < total + base) {
+      const w = base * (0.2 + Math.random() * 1.8);
+      widths.push(w);
+      x += w;
+    }
+    return widths;
+  }
+
   // ── polygon builder ───────────────────────────────────────────────
   // Connects point i to its opposite (i + n/2) when distance > threshold,
   // forming a quad from (i, i+1, opp+1, opp).
+  // Layout (grid lines / stripe widths) is pre-computed here so redraws
+  // stay stable and Math.random() isn't called during paint.
 
   // isClosed: path loops back near its start → use full modulo wrap.
   // Open path: skip the last ~15% of iterations to avoid wrap-around artifacts.
-  function buildPolygons(contour, isClosed) {
+  function buildPolygons(contour, isClosed, canvasWidth) {
     const n = contour.length;
     const half = Math.floor(n / 2);
     const limit = isClosed ? half : Math.floor(half * 0.85);
     const polys = [];
     const fillTypes = ['checks', 'stripes', 'noise'];
+    const base = Math.max(10, canvasWidth * 0.022);
 
     for (let i = 0; i < limit; i++) {
       const a   = contour[i];
@@ -136,44 +164,58 @@ new p5(function(p) {
         ? shuffle(PALETTE).slice(0, 2)
         : [STRIPE_DARK, STRIPE_LIGHT];
 
-      polys.push({ verts: [a, b, d, c], fillType: ft, colors, stripeAngle: Math.random() * Math.PI });
+      // Bounding box of this quad (needed for layout generation)
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const v of [a, b, c, d]) {
+        if (v.x < minX) minX = v.x; if (v.x > maxX) maxX = v.x;
+        if (v.y < minY) minY = v.y; if (v.y > maxY) maxY = v.y;
+      }
+
+      let layout;
+      if (ft === 'checks') {
+        layout = {
+          cols: makeIrregularGrid(minX - base, maxX + base, base),
+          rows: makeIrregularGrid(minY - base, maxY + base, base),
+        };
+      } else if (ft === 'stripes') {
+        const diag = Math.sqrt((maxX - minX) ** 2 + (maxY - minY) ** 2) + base * 4;
+        layout = { diag, widths: makeIrregularWidths(diag, base * 0.65) };
+      }
+
+      polys.push({ verts: [a, b, d, c], fillType: ft, colors,
+                   stripeAngle: Math.random() * Math.PI, layout });
     }
     return polys;
   }
 
   // ── pattern fills (each clips to the polygon) ─────────────────────
 
-  function drawChecks(ctx, verts, c1, c2, size) {
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const v of verts) {
-      if (v.x < minX) minX = v.x; if (v.x > maxX) maxX = v.x;
-      if (v.y < minY) minY = v.y; if (v.y > maxY) maxY = v.y;
-    }
-    const sx = Math.floor(minX / size) * size;
-    const sy = Math.floor(minY / size) * size;
-    for (let gy = sy; gy < maxY; gy += size) {
-      for (let gx = sx; gx < maxX; gx += size) {
-        ctx.fillStyle = ((Math.floor(gx/size) + Math.floor(gy/size)) % 2 === 0) ? c1 : c2;
-        ctx.fillRect(gx, gy, size, size);
+  function drawChecks(ctx, c1, c2, layout) {
+    const { cols, rows } = layout;
+    for (let ri = 0; ri < rows.length - 1; ri++) {
+      for (let ci = 0; ci < cols.length - 1; ci++) {
+        ctx.fillStyle = (ri + ci) % 2 === 0 ? c1 : c2;
+        ctx.fillRect(cols[ci], rows[ri], cols[ci + 1] - cols[ci], rows[ri + 1] - rows[ri]);
       }
     }
   }
 
-  function drawStripes(ctx, verts, c1, c2, width, angle) {
+  function drawStripes(ctx, verts, c1, c2, angle, layout) {
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     for (const v of verts) {
       if (v.x < minX) minX = v.x; if (v.x > maxX) maxX = v.x;
       if (v.y < minY) minY = v.y; if (v.y > maxY) maxY = v.y;
     }
-    const diag = Math.sqrt((maxX - minX) ** 2 + (maxY - minY) ** 2) + width * 2;
+    const { diag, widths } = layout;
     const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
     ctx.save();
     ctx.translate(cx, cy);
     ctx.rotate(angle);
-    const n = Math.ceil(diag / width) + 2;
-    for (let i = -n; i <= n; i++) {
+    let x = -diag / 2;
+    for (let i = 0; i < widths.length; i++) {
       ctx.fillStyle = i % 2 === 0 ? c1 : c2;
-      ctx.fillRect(i * width - width / 2, -diag / 2, width, diag);
+      ctx.fillRect(x, -diag / 2, widths[i], diag);
+      x += widths[i];
     }
     ctx.restore();
   }
@@ -194,7 +236,7 @@ new p5(function(p) {
   }
 
   function clipAndDraw(p, poly) {
-    const { verts, fillType, colors } = poly;
+    const { verts, fillType, colors, layout } = poly;
     const ctx = p.drawingContext;
     ctx.save();
     ctx.beginPath();
@@ -202,9 +244,8 @@ new p5(function(p) {
     for (let i = 1; i < verts.length; i++) ctx.lineTo(verts[i].x, verts[i].y);
     ctx.closePath();
     ctx.clip();
-    const size = Math.max(10, p.width * 0.022);
-    if (fillType === 'checks')       drawChecks(ctx, verts, colors[0], colors[1], size);
-    else if (fillType === 'stripes') drawStripes(ctx, verts, colors[0], colors[1], size * 0.65, poly.stripeAngle);
+    if (fillType === 'checks')       drawChecks(ctx, colors[0], colors[1], layout);
+    else if (fillType === 'stripes') drawStripes(ctx, verts, colors[0], colors[1], poly.stripeAngle, layout);
     else                             drawNoise(ctx, verts, GRAIN_DARK, GRAIN_LIGHT);
     ctx.restore();
   }
@@ -261,7 +302,7 @@ new p5(function(p) {
 
     const resampled = resample(rawPath, SAMPLE_COUNT);
     const isClosed  = dist2(resampled[0], resampled[resampled.length - 1]) < CLOSE_THRESHOLD * CLOSE_THRESHOLD;
-    polygons.push(...buildPolygons(resampled, isClosed));
+    polygons.push(...buildPolygons(resampled, isClosed, p.width));
     rawPath = [];
     p.redraw();
   }
