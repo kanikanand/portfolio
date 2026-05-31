@@ -16,7 +16,7 @@
 </style>
 </head>
 <body>
-<div id="hint">draw a shape</div>
+<div id="hint">move cursor to draw</div>
 
 <script src="p5.min.js"></script>
 
@@ -217,37 +217,46 @@ new p5(function(p) {
   }
 
   // ── draw interaction ──────────────────────────────────────────────
+  // Drawing starts the moment the cursor/finger moves — no press needed.
+  // Stopping movement for DEBOUNCE_MS triggers the risograph fill.
 
-  function startDraw(x, y) {
-    isDrawing = true;
-    rawPath = [{ x, y }];
-    drawnPath = [];
-    polygons = [];
-    hint.style.opacity = '0';
-    p.redraw();
+  const DEBOUNCE_MS = 700;
+  let debounceTimer = null;
+
+  function armDebounce() {
+    clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(endDraw, DEBOUNCE_MS);
   }
 
-  function continueDraw(x, y) {
-    if (!isDrawing) return;
-    const last = rawPath[rawPath.length - 1];
-    if (dist2({ x, y }, last) < MIN_DRAG_STEP * MIN_DRAG_STEP) return;
-    rawPath.push({ x, y });
+  function onMove(x, y) {
+    if (!isDrawing) {
+      // Start fresh on first movement
+      isDrawing = true;
+      rawPath   = [{ x, y }];
+      drawnPath = [];
+      polygons  = [];
+      hint.style.opacity = '0';
+    } else {
+      const last = rawPath[rawPath.length - 1];
+      if (dist2({ x, y }, last) < MIN_DRAG_STEP * MIN_DRAG_STEP) return;
+      rawPath.push({ x, y });
+    }
+    armDebounce();
     p.redraw();
   }
 
   function endDraw() {
+    clearTimeout(debounceTimer);
     if (!isDrawing) return;
     isDrawing = false;
 
     if (rawPath.length < 12) {
-      // too short — clear
       rawPath = [];
       p.redraw();
       hint.style.opacity = '0.7';
       return;
     }
 
-    // Resample and treat as closed loop
     drawnPath = resample(rawPath, SAMPLE_COUNT);
     polygons  = buildPolygons(drawnPath);
     p.redraw();
@@ -260,19 +269,12 @@ new p5(function(p) {
     p.noLoop();
     grainLayer = buildGrain(p);
 
-    // Touch events (prevent scroll)
-    cnv.elt.addEventListener('touchstart', e => {
-      e.preventDefault();
-      const r = cnv.elt.getBoundingClientRect();
-      const t = e.touches[0];
-      startDraw(t.clientX - r.left, t.clientY - r.top);
-    }, { passive: false });
-
+    // Touch — move starts/continues drawing, lift ends it
     cnv.elt.addEventListener('touchmove', e => {
       e.preventDefault();
       const r = cnv.elt.getBoundingClientRect();
       const t = e.touches[0];
-      continueDraw(t.clientX - r.left, t.clientY - r.top);
+      onMove(t.clientX - r.left, t.clientY - r.top);
     }, { passive: false });
 
     cnv.elt.addEventListener('touchend', e => {
@@ -281,9 +283,9 @@ new p5(function(p) {
     }, { passive: false });
   };
 
-  p.mousePressed  = function() { startDraw(p.mouseX, p.mouseY); };
-  p.mouseDragged  = function() { continueDraw(p.mouseX, p.mouseY); };
-  p.mouseReleased = function() { endDraw(); };
+  // Mouse move (no button required) and drag (button held) both feed onMove
+  p.mouseMoved  = function() { onMove(p.mouseX, p.mouseY); };
+  p.mouseDragged = function() { onMove(p.mouseX, p.mouseY); };
 
   p.draw = function() {
     p.background(BG_COLOR);
@@ -301,20 +303,8 @@ new p5(function(p) {
       return;
     }
 
-    // Finished: draw filled polygons
+    // Finished: filled polygons + grain only (no outline)
     for (const poly of polygons) clipAndDraw(p, poly);
-
-    // Draw outline of the path
-    if (drawnPath.length > 1) {
-      p.noFill();
-      p.stroke(OUTLINE_COLOR);
-      p.strokeWeight(Math.max(1.5, p.width * 0.003));
-      p.beginShape();
-      for (const pt of drawnPath) p.vertex(pt.x, pt.y);
-      p.endShape(p.CLOSE);
-    }
-
-    // Grain overlay
     if (grainLayer) p.image(grainLayer, 0, 0);
   };
 
