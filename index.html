@@ -16,7 +16,7 @@
 </style>
 </head>
 <body>
-<div id="hint">move cursor to draw</div>
+<div id="hint">move to draw &nbsp;·&nbsp; space to clear</div>
 
 <script src="p5.min.js"></script>
 
@@ -54,6 +54,9 @@ const GRAIN_DENSITY = 0.18;
 
 // Minimum px gap between recorded drag points (deduplicate micro-jitter)
 const MIN_DRAG_STEP = 6;
+
+// Distance (px) from path end to path start that counts as "closed"
+const CLOSE_THRESHOLD = 60;
 // ───────────────────────────────────────────────────────────────────
 
 let isDrawing  = false;
@@ -110,13 +113,16 @@ new p5(function(p) {
   // Connects point i to its opposite (i + n/2) when distance > threshold,
   // forming a quad from (i, i+1, opp+1, opp).
 
-  function buildPolygons(contour) {
+  // isClosed: path loops back near its start → use full modulo wrap.
+  // Open path: skip the last ~15% of iterations to avoid wrap-around artifacts.
+  function buildPolygons(contour, isClosed) {
     const n = contour.length;
     const half = Math.floor(n / 2);
+    const limit = isClosed ? half : Math.floor(half * 0.85);
     const polys = [];
     const fillTypes = ['checks', 'stripes', 'noise'];
 
-    for (let i = 0; i < half; i++) {
+    for (let i = 0; i < limit; i++) {
       const a   = contour[i];
       const b   = contour[(i + 1) % n];
       const opp = (i + half) % n;
@@ -230,11 +236,8 @@ new p5(function(p) {
 
   function onMove(x, y) {
     if (!isDrawing) {
-      // Start fresh on first movement
       isDrawing = true;
       rawPath   = [{ x, y }];
-      drawnPath = [];
-      polygons  = [];
       hint.style.opacity = '0';
     } else {
       const last = rawPath[rawPath.length - 1];
@@ -253,12 +256,22 @@ new p5(function(p) {
     if (rawPath.length < 12) {
       rawPath = [];
       p.redraw();
-      hint.style.opacity = '0.7';
       return;
     }
 
-    drawnPath = resample(rawPath, SAMPLE_COUNT);
-    polygons  = buildPolygons(drawnPath);
+    const resampled = resample(rawPath, SAMPLE_COUNT);
+    const isClosed  = dist2(resampled[0], resampled[resampled.length - 1]) < CLOSE_THRESHOLD * CLOSE_THRESHOLD;
+    polygons.push(...buildPolygons(resampled, isClosed));
+    rawPath = [];
+    p.redraw();
+  }
+
+  function clearSketch() {
+    polygons  = [];
+    rawPath   = [];
+    isDrawing = false;
+    clearTimeout(debounceTimer);
+    hint.style.opacity = '0.7';
     p.redraw();
   }
 
@@ -284,8 +297,12 @@ new p5(function(p) {
   };
 
   // Mouse move (no button required) and drag (button held) both feed onMove
-  p.mouseMoved  = function() { onMove(p.mouseX, p.mouseY); };
+  p.mouseMoved   = function() { onMove(p.mouseX, p.mouseY); };
   p.mouseDragged = function() { onMove(p.mouseX, p.mouseY); };
+
+  p.keyPressed = function() {
+    if (p.key === ' ') clearSketch();
+  };
 
   p.draw = function() {
     p.background(BG_COLOR);
