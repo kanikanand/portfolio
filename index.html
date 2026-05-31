@@ -109,29 +109,20 @@ new p5(function(p) {
     return a;
   }
 
-  // ── irregular layout generators ──────────────────────────────────
-  // Produce column/row positions with randomised gaps for uneven grids,
-  // and stripe widths that vary across the polygon.
+  // ── uniform layout generators ─────────────────────────────────────
+  // Each polygon gets ONE randomly chosen cell/stripe size — uniform
+  // within that polygon but varying across polygons (dense vs sparse).
 
-  function makeIrregularGrid(start, end, base) {
-    const lines = [start];
-    let pos = start;
-    while (pos < end) {
-      pos += base * (0.25 + Math.random() * 1.6);
-      lines.push(pos);
-    }
+  function makeUniformGrid(start, end, size) {
+    const lines = [];
+    for (let p = Math.floor(start / size) * size; p <= end + size; p += size)
+      lines.push(p);
     return lines;
   }
 
-  function makeIrregularWidths(total, base) {
-    const widths = [];
-    let x = 0;
-    while (x < total + base) {
-      const w = base * (0.2 + Math.random() * 1.8);
-      widths.push(w);
-      x += w;
-    }
-    return widths;
+  function makeUniformWidths(total, width) {
+    const count = Math.ceil((total + width) / width);
+    return Array.from({ length: count }, () => width);
   }
 
   // ── polygon builder ───────────────────────────────────────────────
@@ -171,15 +162,19 @@ new p5(function(p) {
         if (v.y < minY) minY = v.y; if (v.y > maxY) maxY = v.y;
       }
 
+      // One density chosen per polygon: cells are uniform within it,
+      // but size varies across polygons (0.3× … 2.5× base).
+      const density = base * (0.3 + Math.random() * 2.2);
+
       let layout;
       if (ft === 'checks') {
         layout = {
-          cols: makeIrregularGrid(minX - base, maxX + base, base),
-          rows: makeIrregularGrid(minY - base, maxY + base, base),
+          cols: makeUniformGrid(minX - density, maxX + density, density),
+          rows: makeUniformGrid(minY - density, maxY + density, density),
         };
       } else if (ft === 'stripes') {
-        const diag = Math.sqrt((maxX - minX) ** 2 + (maxY - minY) ** 2) + base * 4;
-        layout = { diag, widths: makeIrregularWidths(diag, base * 0.65) };
+        const diag = Math.sqrt((maxX - minX) ** 2 + (maxY - minY) ** 2) + density * 4;
+        layout = { diag, widths: makeUniformWidths(diag, density * 0.65) };
       }
 
       polys.push({ verts: [a, b, d, c], fillType: ft, colors,
@@ -348,22 +343,19 @@ new p5(function(p) {
   p.draw = function() {
     p.background(BG_COLOR);
 
-    if (isDrawing) {
-      // Live path preview while dragging
-      if (rawPath.length > 1) {
-        p.noFill();
-        p.stroke(OUTLINE_COLOR);
-        p.strokeWeight(2);
-        p.beginShape();
-        for (const pt of rawPath) p.vertex(pt.x, pt.y);
-        p.endShape();
-      }
-      return;
-    }
-
-    // Finished: filled polygons + grain only (no outline)
+    // Always draw every accumulated polygon first
     for (const poly of polygons) clipAndDraw(p, poly);
     if (grainLayer) p.image(grainLayer, 0, 0);
+
+    // Overlay the live stroke preview on top while drawing
+    if (isDrawing && rawPath.length > 1) {
+      p.noFill();
+      p.stroke(OUTLINE_COLOR);
+      p.strokeWeight(2);
+      p.beginShape();
+      for (const pt of rawPath) p.vertex(pt.x, pt.y);
+      p.endShape();
+    }
   };
 
   p.windowResized = function() {
