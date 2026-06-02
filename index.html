@@ -44,19 +44,19 @@ const GRAIN_DARK   = '#1A1010';
 const GRAIN_LIGHT  = '#F2E8DC';
 
 // Minimum distance (px) between two opposite outline points to form a polygon
-const CONNECTION_THRESHOLD = 30;
+const CONNECTION_THRESHOLD = 10;
 
 // Points to resample path to before building polygons
-const SAMPLE_COUNT = 100;
+const SAMPLE_COUNT = 200;
 
 // Dots per px² for the noise fill
-const GRAIN_DENSITY = 0.18;
+const GRAIN_DENSITY = 0.28;
 
 // Minimum px gap between recorded drag points (deduplicate micro-jitter)
-const MIN_DRAG_STEP = 6;
+const MIN_DRAG_STEP = 12;
 
 // Distance (px) from path end to path start that counts as "closed"
-const CLOSE_THRESHOLD = 60;
+const CLOSE_THRESHOLD = 120;
 // ───────────────────────────────────────────────────────────────────
 
 let isDrawing  = false;
